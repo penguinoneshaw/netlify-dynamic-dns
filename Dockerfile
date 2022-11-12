@@ -1,6 +1,8 @@
-FROM golang:alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:alpine AS builder
 
 ARG VERSION
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN adduser -D -g '' nddns_usr
 
@@ -10,7 +12,7 @@ RUN apk update && \
 
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags "-X main.Version=${VERSION}" -o ./nddns ./cmd
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-X main.Version=${VERSION}" -o ./nddns ./cmd
 
 FROM scratch
 LABEL org.opencontainers.image.title Netlify Dynamic DNS

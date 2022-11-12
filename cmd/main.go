@@ -4,24 +4,26 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alexflint/go-arg"
-	"github.com/go-openapi/runtime"
+	openApiRuntime "github.com/go-openapi/runtime"
 	"github.com/go-openapi/strfmt"
 	"github.com/janeczku/go-spinner"
 	"github.com/netlify/open-api/go/models"
 	"github.com/netlify/open-api/go/plumbing/operations"
 	"github.com/netlify/open-api/go/porcelain"
-	"github.com/oscartbeaumont/netlify-dynamic-dns/internal/analytics"
 	"github.com/oscartbeaumont/netlify-dynamic-dns/internal/publicip"
+	"golang.org/x/exp/slices"
 )
 
 var args Arguments
 var netlify = porcelain.NewRetryable(porcelain.Default.Transport, nil, porcelain.DefaultRetryAttempts)
-var netlifyAuth = runtime.ClientAuthInfoWriterFunc(func(r runtime.ClientRequest, _ strfmt.Registry) error {
+var netlifyAuth = openApiRuntime.ClientAuthInfoWriterFunc(func(r openApiRuntime.ClientRequest, _ strfmt.Registry) error {
 	if err := r.SetHeaderParam("User-Agent", "NetlifyDDNS"); err != nil {
 		return err
 	}
@@ -32,41 +34,32 @@ var netlifyAuth = runtime.ClientAuthInfoWriterFunc(func(r runtime.ClientRequest,
 })
 var ipProvider publicip.Provider = publicip.OpenDNSProvider{}
 
+func constructRecords(args Arguments) []string {
+	if args.UpdateRootRecord {
+		return []string{args.Zone}
+	}
+
+	result := make([]string, len(args.Record))
+
+	for index, record := range args.Record {
+		result[index] = record + "." + args.Zone
+	}
+
+	return result
+}
+
 func main() {
 	validation := arg.MustParse(&args)
-	args.zoneID = strings.ReplaceAll(args.Zone, ".", "_")
+	zoneId := strings.ReplaceAll(args.Zone, ".", "_")
 
-	if !args.UpdateRootRecord && args.Record == "" {
+	if !args.UpdateRootRecord && len(args.Record) == 0 {
 		validation.Fail("Either --record or --updaterootrecord must be provided")
 	}
 
-	if args.UpdateRootRecord {
-		args.recordHostname = args.Zone
-	} else {
-		args.recordHostname = args.Record + "." + args.Zone
-	}
-
-	var lastAnalyticsReport time.Time
 	var forBreak = true
 	for forBreak {
-		var analyticsChan = make(chan *struct{}, 1)
-		if lastAnalyticsReport.IsZero() || time.Since(lastAnalyticsReport) > time.Hour*24 {
-			go func() {
-				if err := analytics.Report(Version); err != nil {
-					fmt.Println(Red+"Error reporting anonymous analytics data: ", err, Reset)
-				} else {
-					lastAnalyticsReport = time.Now()
-				}
-
-				analyticsChan <- nil
-			}()
-		} else {
-			analyticsChan <- nil
-		}
-
 		s := spinner.StartNew("Updating DNS record")
-		err := doUpdate()
-		<-analyticsChan
+		err := doUpdate(zoneId, constructRecords(args))
 		s.Stop()
 
 		if err != nil {
@@ -82,9 +75,10 @@ func main() {
 }
 
 // doUpdate updates the DNS records with the public IP address
-func doUpdate() error {
+func doUpdate(zoneID string, records []string) error {
 	// Get the Public IP
 	ipv4, err := ipProvider.GetIPv4()
+
 	if err != nil {
 		return fmt.Errorf("error retrieving your public ipv4 address: %w", err)
 	}
@@ -97,8 +91,7 @@ func doUpdate() error {
 		}
 	}
 
-	getparams := operations.NewGetDNSRecordsParams()
-	getparams.ZoneID = args.zoneID
+	getparams := operations.NewGetDNSRecordsParams().WithZoneID(zoneID)
 	resp, err := netlify.Operations.GetDNSRecords(getparams, netlifyAuth)
 	if err != nil {
 		errr, apiError := err.(*operations.GetDNSRecordsDefault)
@@ -109,71 +102,72 @@ func doUpdate() error {
 		}
 	}
 
-	// Get existing records if they exist
-	var existingARecord *models.DNSRecord
-	var existingAAAARecord *models.DNSRecord
-	for _, record := range resp.Payload {
-		if record.Hostname == args.recordHostname {
-			if record.Type == "A" {
-				existingARecord = record
-			} else if record.Type == "AAAA" {
-				existingAAAARecord = record
+	numCPU := runtime.NumCPU()
+	c := make(chan error, numCPU)
+	defer close(c)
+
+	deleteRecord := func(waitGroup *sync.WaitGroup, record *models.DNSRecord) {
+		defer waitGroup.Done()
+
+		if record != nil {
+			deleteparams := operations.NewDeleteDNSRecordParams()
+			deleteparams.ZoneID = record.DNSZoneID
+			deleteparams.DNSRecordID = record.ID
+			if _, err := netlify.Operations.DeleteDNSRecord(deleteparams, netlifyAuth); err != nil {
+				c <- err
 			}
 		}
 	}
 
-	// Delete existing records if they exist (Netlify DNS API has no update feature)
-	if existingARecord != nil {
-		deleteparams := operations.NewDeleteDNSRecordParams()
-		deleteparams.ZoneID = existingARecord.DNSZoneID
-		deleteparams.DNSRecordID = existingARecord.ID
-		if _, err := netlify.Operations.DeleteDNSRecord(deleteparams, netlifyAuth); err != nil {
-			return fmt.Errorf("error deleting existing record from Netlify DNS: %w", err)
+	var waitGroup sync.WaitGroup
+
+	for _, record := range resp.Payload {
+		if record.Type == "A" || record.Type == "AAAA" && args.IPv6 {
+			if slices.Contains(records, record.Hostname) {
+				waitGroup.Add(1)
+				go deleteRecord(&waitGroup, record)
+			}
 		}
 	}
 
-	if existingAAAARecord != nil {
-		deleteparams := operations.NewDeleteDNSRecordParams()
-		deleteparams.ZoneID = existingAAAARecord.DNSZoneID
-		deleteparams.DNSRecordID = existingAAAARecord.ID
-		if _, err := netlify.Operations.DeleteDNSRecord(deleteparams, netlifyAuth); err != nil {
-			return fmt.Errorf("error deleting existing record from Netlify DNS: %w", err)
+	waitGroup.Wait()
+
+	if len(c) > 0 {
+		return fmt.Errorf("error creating new DNS record on Netlify DNS: %w", <-c)
+	}
+
+	createRecord := func(c chan<- error, waitGroup *sync.WaitGroup, recordType string, record string, value string, ttl int64) {
+		defer waitGroup.Done()
+		var newRecord = &models.DNSRecordCreate{
+			Hostname: record,
+			Type:     recordType,
+			Value:    value,
+			TTL:      ttl,
+		}
+		createparams := operations.NewCreateDNSRecordParams().WithZoneID(zoneID).WithDNSRecord(newRecord)
+
+		if _, err := netlify.Operations.CreateDNSRecord(createparams, netlifyAuth); err != nil {
+			c <- err
 		}
 	}
 
-	// Create new record
-	var ipv4Record = &models.DNSRecordCreate{
-		Hostname: args.recordHostname,
-		Type:     "A",
-		Value:    ipv4,
-	}
-	if existingARecord != nil {
-		ipv4Record.TTL = existingARecord.TTL
-	}
-
-	createparams := operations.NewCreateDNSRecordParams()
-	createparams.ZoneID = args.zoneID
-	createparams.DNSRecord = ipv4Record
-	if _, err := netlify.Operations.CreateDNSRecord(createparams, netlifyAuth); err != nil {
-		return fmt.Errorf("error creating new DNS record on Netlify DNS: %w", err)
-	}
-
-	if args.IPv6 {
-		var ipv6Record = &models.DNSRecordCreate{
-			Hostname: args.recordHostname,
-			Type:     "AAAA",
-			Value:    ipv6,
+	for _, record := range records {
+		var ttl int64 = 3600
+		if args.Interval > 0 {
+			ttl = int64(args.Interval + 30)
 		}
-		if existingAAAARecord != nil {
-			ipv6Record.TTL = existingAAAARecord.TTL
-		}
+		waitGroup.Add(1)
+		go createRecord(c, &waitGroup, "A", record, ipv4, ttl)
 
-		create2params := operations.NewCreateDNSRecordParams()
-		create2params.ZoneID = args.zoneID
-		create2params.DNSRecord = ipv6Record
-		if _, err := netlify.Operations.CreateDNSRecord(create2params, netlifyAuth); err != nil {
-			return fmt.Errorf("error creating new DNS record on Netlify DNS: %w", err)
+		if args.IPv6 {
+			waitGroup.Add(1)
+			go createRecord(c, &waitGroup, "AAAA", record, ipv6, ttl)
 		}
+	}
+	waitGroup.Wait()
+
+	if len(c) > 0 {
+		return <-c
 	}
 
 	return nil
