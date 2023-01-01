@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alexflint/go-arg"
+	"github.com/cenkalti/backoff/v4"
 	openApiRuntime "github.com/go-openapi/runtime"
 	"github.com/go-openapi/strfmt"
 	"github.com/janeczku/go-spinner"
@@ -57,7 +58,6 @@ func main() {
 
 	var continueUpdating = true
 	var waitInterval = time.Duration(args.Interval) * time.Minute
-	var backOff = 0
 
 	ipProvider, err := publicip.NewOpenDNSProvider("1.1.1.1:53")
 	if err != nil {
@@ -65,22 +65,31 @@ func main() {
 	}
 
 	for continueUpdating {
-		s := spinner.StartNew("Updating DNS record")
-		err := doUpdate(ipProvider, zoneId, constructRecords(args))
-		s.Stop()
+		err = backoff.RetryNotify(
+			func() error {
+				s := spinner.StartNew("Updating DNS record")
+				err := doUpdate(ipProvider, zoneId, constructRecords(args))
+				s.Stop()
+
+				return err
+			},
+			backoff.NewExponentialBackOff(),
+			func(err error, d time.Duration) {
+				log.Println(Red + "Error: Updating DNS Record failed with error: " + err.Error() + Reset)
+				log.Printf("Retrying in %d seconds\n", d)
+			},
+		)
 
 		if err != nil {
-			log.Println(Red + "Error: Updating DNS Record failed with error: " + err.Error() + Reset)
-			backOffTime := (1 << backOff) * time.Second
-			backOff += 1
-			log.Printf("Retrying in %d seconds\n", backOffTime)
+			log.Fatalln(Red + "Error: Updating DNS Record failed with error: " + err.Error() + Reset)
+		}
 
-		} else if args.Interval == 0 {
+		if args.Interval == 0 {
 			log.Println(Green + "DNS records updated successfully." + Reset + "")
 			continueUpdating = false
 		} else {
 			log.Println(Green + "DNS records updated successfully. Next update in " + strconv.Itoa(args.Interval) + " minutes" + Reset + "")
-			backOff = 0
+
 			time.Sleep(waitInterval)
 		}
 	}
