@@ -32,7 +32,6 @@ var netlifyAuth = openApiRuntime.ClientAuthInfoWriterFunc(func(r openApiRuntime.
 	}
 	return nil
 })
-var ipProvider publicip.Provider = publicip.OpenDNSProvider{}
 
 func constructRecords(args Arguments) []string {
 	if args.UpdateRootRecord {
@@ -56,26 +55,39 @@ func main() {
 		validation.Fail("Either --record or --updaterootrecord must be provided")
 	}
 
-	var forBreak = true
-	for forBreak {
+	var continueUpdating = true
+	var waitInterval = time.Duration(args.Interval) * time.Minute
+	var backOff = 0
+
+	ipProvider, err := publicip.NewOpenDNSProvider("1.1.1.1:53")
+	if err != nil {
+		log.Fatalf("Failed to initialize OpenDNS provider with error: %v\n", err)
+	}
+
+	for continueUpdating {
 		s := spinner.StartNew("Updating DNS record")
-		err := doUpdate(zoneId, constructRecords(args))
+		err := doUpdate(ipProvider, zoneId, constructRecords(args))
 		s.Stop()
 
 		if err != nil {
-			log.Println(Red + "Error: Error Updating DNS Record " + err.Error() + Reset)
+			log.Println(Red + "Error: Updating DNS Record failed with error: " + err.Error() + Reset)
+			backOffTime := (1 << backOff) * time.Second
+			backOff += 1
+			log.Printf("Retrying in %d seconds\n", backOffTime)
+
 		} else if args.Interval == 0 {
 			log.Println(Green + "DNS records updated successfully." + Reset + "")
-			forBreak = false
+			continueUpdating = false
 		} else {
 			log.Println(Green + "DNS records updated successfully. Next update in " + strconv.Itoa(args.Interval) + " minutes" + Reset + "")
-			time.Sleep(time.Duration(args.Interval) * time.Minute)
+			backOff = 0
+			time.Sleep(waitInterval)
 		}
 	}
 }
 
 // doUpdate updates the DNS records with the public IP address
-func doUpdate(zoneID string, records []string) error {
+func doUpdate(ipProvider publicip.Provider, zoneID string, records []string) error {
 	// Get the Public IP
 	ipv4, err := ipProvider.GetIPv4()
 

@@ -39,7 +39,7 @@ jobs:
             nddns_linux
             nddns_linux_arm64
             nddns_darwin
-            nddns_windows
+            nddns_windows.exe
 
   release-docker:
     runs-on: ubuntu-latest

@@ -13,3 +13,6 @@
 
 # Mac Finder Files
 .DS_Store
+
+# Environment files
+.env

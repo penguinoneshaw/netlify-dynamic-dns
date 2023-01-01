@@ -12,6 +12,7 @@ import (
 
 	"github.com/netlify/open-api/go/models"
 	"github.com/netlify/open-api/go/plumbing/operations"
+	"github.com/oscartbeaumont/netlify-dynamic-dns/internal/publicip"
 )
 
 var commandBaseArgs = []string{"run", "./"}
@@ -29,16 +30,24 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("NDDNS_DISABLE_ANALYTICS", "true")
 	args.AccessToken = os.Getenv("NDDNS_TEST_ACCESS_TOKEN")
-	args.zoneID = strings.ReplaceAll(os.Getenv("NDDNS_TEST_ZONE"), ".", "_")
+	args.Zone = os.Getenv("NDDNS_TEST_ZONE")
 
 	// Get the Public IP
 	var err error
+	var ipProvider publicip.Provider
+
+	ipProvider, err = publicip.NewOpenDNSProvider("8.8.8.8:53")
+
+	if err != nil {
+		log.Fatalf("error initalizing IP Provider: %v\n", err)
+	}
+
 	if myIPv4, err = ipProvider.GetIPv4(); err != nil {
-		log.Fatalln("error retrieving your public ipv4 address: %w", err)
+		log.Fatalf("error retrieving your public ipv4 address: %w\n", err)
 	}
 	if os.Getenv("NDDNS_IPv6_ENABLED") != "false" {
 		if myIPv6, err = ipProvider.GetIPv6(); err != nil {
-			log.Fatalln("error retrieving your public ipv6 address: %w", err)
+			log.Fatalf("error retrieving your public ipv6 address: %w\n", err)
 		}
 	}
 	code := m.Run()
@@ -71,7 +80,7 @@ func TestNormal(t *testing.T) {
 	// Create existing record 'nddns-test-01' with weird TTL to test passthrough
 	for _, record := range [][]string{{"A", "0.0.0.0"}, {"AAAA", "0000:0000:0000:0000:0000:0000:0000:0000"}} {
 		createparams := operations.NewCreateDNSRecordParams()
-		createparams.ZoneID = args.zoneID
+		createparams.ZoneID = strings.ReplaceAll(args.Zone, ".", "_")
 		createparams.DNSRecord = &models.DNSRecordCreate{
 			Hostname: "nddns-test-01",
 			Type:     record[0],
@@ -101,7 +110,7 @@ func TestNormal(t *testing.T) {
 		}
 
 		getparams := operations.NewGetDNSRecordsParams()
-		getparams.ZoneID = args.zoneID
+		getparams.ZoneID = strings.ReplaceAll(args.Zone, ".", "_")
 		resp, err := netlify.Operations.GetDNSRecords(getparams, netlifyAuth)
 		if err != nil {
 			errr, apiError := err.(*operations.GetDNSRecordsDefault)
