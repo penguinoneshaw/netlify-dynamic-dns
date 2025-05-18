@@ -12,7 +12,7 @@ import (
 
 	"github.com/netlify/open-api/go/models"
 	"github.com/netlify/open-api/go/plumbing/operations"
-	"github.com/oscartbeaumont/netlify-dynamic-dns/internal/publicip"
+	"github.com/penguinoneshaw/netlify-dynamic-dns/internal/publicip"
 )
 
 var commandBaseArgs = []string{"run", "./"}

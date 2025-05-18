@@ -18,7 +18,7 @@ import (
 	"github.com/netlify/open-api/go/models"
 	"github.com/netlify/open-api/go/plumbing/operations"
 	"github.com/netlify/open-api/go/porcelain"
-	"github.com/oscartbeaumont/netlify-dynamic-dns/internal/publicip"
+	"github.com/penguinoneshaw/netlify-dynamic-dns/internal/publicip"
 	"golang.org/x/exp/slices"
 )
 
