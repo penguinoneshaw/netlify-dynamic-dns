@@ -19,10 +19,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: ">=v1.19.0"
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          cache: true
       - name: Go Installation Information
         run: go version
-
       - name: Build Binaries
         run: |
           GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${GITHUB_REF#refs/tags/}" -o nddns_linux ./cmd
