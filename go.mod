@@ -3,7 +3,7 @@ module github.com/penguinoneshaw/netlify-dynamic-dns
 go 1.25.1
 
 require (
-	github.com/alexflint/go-arg v1.6.0
+	github.com/alexflint/go-arg v1.6.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/go-openapi/runtime v0.28.0
 	github.com/go-openapi/strfmt v0.23.0
